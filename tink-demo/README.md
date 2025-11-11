@@ -54,3 +54,27 @@ Security reminders (mention briefly to participants):
 - AEAD is randomized; encrypting the same plaintext twice yields different ciphertexts (good for security).
 - Signatures are deterministic for ECDSA in Tink (given same key/message) but you should still treat signatures as opaque bytes.
 
+## For hashicorp
+### in one terminal
+```bash
+vault server -config=crypto-tink-study/tink-demo/vault-dev.hcl
+```
+
+this starts the UI, for key creation, choose: 
+```bash 
+key share = 1
+key threshold = 1
+```
+
+Copy and save the **Initial root token** and **Key 1**
+
+then on first prompt (**Unseal Vault**): use key1
+then on second prompt (**Sign in to Vault**): use method **token**, use **Initial root token**
+
+# terminal 2
+export VAULT_ADDR='http://127.0.0.1:8200'
+export VAULT_TOKEN='root'
+
+vault status
+vault secrets enable transit
+vault write -f transit/keys/tink-kek    # create a transit key named tink-kek
