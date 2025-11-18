@@ -30,6 +30,7 @@ flags.DEFINE_string('associated_data', None, 'Optional associated data for data 
 flags.DEFINE_string('vault_addr', None, 'Vault address, e.g. https://127.0.0.1:8200')
 flags.DEFINE_string('vault_token', None, 'Vault token value.')
 flags.DEFINE_bool('vault_skip_verify', None, 'Skip TLS verification (dev/self-signed).')
+flags.DEFINE_bool('auto_create_transit', True, 'Automatically enable transit engine and create key if missing.')
 
 
 class VaultTransitAead(aead.Aead):
@@ -92,6 +93,47 @@ def _vault_from_env_or_flags():
   return addr, token, verify_tls
 
 
+def _ensure_transit_key(vault_addr: str, token: str, key_name: str, verify_tls: bool):
+  """Ensure transit engine mounted and key exists. Safe to call repeatedly.
+
+  Steps:
+    1. Check key existence via read endpoint; if 404, attempt creation.
+    2. If creation fails due to missing mount, mount transit then retry key creation.
+  """
+  session = requests.Session()
+  session.headers.update({"X-Vault-Token": token})
+  base = vault_addr.rstrip('/')
+  key_read_url = f"{base}/v1/transit/keys/{key_name}"  # reading key (GET) gives metadata
+  try:
+    resp = session.get(key_read_url, verify=verify_tls)
+    if resp.status_code == 200:
+      return  # key exists
+  except requests.RequestException:
+    pass  # proceed to creation attempts
+
+  # Try create key
+  key_create_url = key_read_url
+  create_payload = {"type": "aes256-gcm"}
+  resp = session.post(key_create_url, json=create_payload, verify=verify_tls)
+  if resp.status_code in (200, 201, 204):
+    return
+  # If mount missing, enable transit then retry
+  if resp.status_code == 404:
+    mount_url = f"{base}/v1/sys/mounts/transit"
+    mount_payload = {"type": "transit"}
+    mresp = session.post(mount_url, json=mount_payload, verify=verify_tls)
+    if mresp.status_code not in (200,201,204):
+      raise RuntimeError(f"Failed to mount transit engine: {mresp.status_code} {mresp.text}")
+    resp2 = session.post(key_create_url, json=create_payload, verify=verify_tls)
+    if resp2.status_code not in (200,201,204):
+      raise RuntimeError(f"Transit key creation failed after mount: {resp2.status_code} {resp2.text}")
+    return
+  # Other errors (403 etc.) indicate policy problems
+  if resp.status_code == 403:
+    raise RuntimeError("Vault token lacks permissions for transit key create/read (403).")
+  raise RuntimeError(f"Unexpected response creating transit key: {resp.status_code} {resp.text}")
+
+
 def main(argv):
   del argv
   aead.register()
@@ -99,6 +141,8 @@ def main(argv):
   try:
     key_name = _parse_vault_kek_uri(FLAGS.kek_uri)
     vault_addr, vault_token, verify_tls = _vault_from_env_or_flags()
+    if FLAGS.auto_create_transit:
+      _ensure_transit_key(vault_addr, vault_token, key_name, verify_tls)
     remote_aead = VaultTransitAead(vault_addr, vault_token, key_name, verify_tls=verify_tls)
   except Exception as e:
     logging.exception('Vault Transit setup failed: %s', e)
