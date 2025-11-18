@@ -60,11 +60,6 @@ Security reminders (mention briefly to participants):
 vault server -config=crypto-tink-study/tink-demo/vault-dev.hcl
 ```
 
-this starts the UI, for key creation, choose: 
-```bash 
-key share = 1
-key threshold = 1
-```
 
 Copy and save the **Initial root token** and **Key 1**
 
@@ -72,9 +67,65 @@ then on first prompt (**Unseal Vault**): use key1
 then on second prompt (**Sign in to Vault**): use method **token**, use **Initial root token**
 
 # terminal 2
-export VAULT_ADDR='http://127.0.0.1:8200'
+### better in your .venv in the project, you wil need the VAULT_TOKEN
+
+```bash
+vault server -config=vault-dev.hcl &
+export VAULT_ADDR=https://127.0.0.1:8200
+export VAULT_SKIP_VERIFY=1
 export VAULT_TOKEN='root'
+
+vault operator init -key-shares=1 -key-threshold=1
+
+# save your keys! 
+vault operator unseal <UNSEAL_KEY_FROM_OUTPUT>
+export VAULT_TOKEN=<NEW_ROOT_TOKEN>
 
 vault status
 vault secrets enable transit
 vault write -f transit/keys/tink-kek    # create a transit key named tink-kek
+vault write -f transit/keys/test
+vault list transit/keys
+# you should see the keys
+```
+
+## Work with Tink: 
+<!-- vault server -dev -dev-root-token-id=root -->
+export VAULT_ADDR=https://127.0.0.1:8200
+export VAULT_TOKEN=root
+export VAULT_SKIP_VERIFY=1  # only for self-signed dev
+
+# Generate encrypted keyset
+python tink_with_vault.py \
+  --mode=generate \
+  --keyset_path=encrypted_keyset.json \
+  --kek_uri=vault://transit/test \
+  --vault_addr=$VAULT_ADDR \
+  --vault_token=$VAULT_TOKEN \
+  --vault_skip_verify
+
+# Encrypt data
+echo 'hello secret world' > plain.txt
+python tink_with_vault.py \
+  --mode=encrypt \
+  --keyset_path=encrypted_keyset.json \
+  --kek_uri=vault://transit/my-app-key \
+  --input_path=plain.txt \
+  --output_path=cipher.bin \
+  --associated_data='file-v1' \
+  --vault_addr=$VAULT_ADDR \
+  --vault_token=$VAULT_TOKEN \
+  --vault_skip_verify
+
+# Decrypt
+python tink_with_vault.py \
+  --mode=decrypt \
+  --keyset_path=encrypted_keyset.json \
+  --kek_uri=vault://transit/my-app-key \
+  --input_path=cipher.bin \
+  --output_path=recovered.txt \
+  --associated_data='file-v1' \
+  --vault_addr=$VAULT_ADDR \
+  --vault_token=$VAULT_TOKEN \
+  --vault_skip_verify
+diff plain.txt recovered.txt
